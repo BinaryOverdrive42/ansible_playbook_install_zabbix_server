@@ -1,0 +1,153 @@
+- hosts: zabbix
+  vars:
+    mysql_root_password: masterkey
+    mysql_zabbix_user_password: master
+    mysql_zabbix_user: zabbix
+    mysql_zabbix_db: zabbix
+    zabbix_deb_url: http://repo.zabbix.com/zabbix/3.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_3.4-1+xenial_all.deb
+  tasks:
+    - name: Update repos information. Upgrade all packages
+      apt:
+        update_cache: yes
+        upgrade: yes
+        cache_valid_time: 86400
+      become: true
+
+    - name: Install MySQL, PHP and requrements
+      apt:
+        name: "{{ item }}"
+        state: installed
+        update_cache: yes
+        cache_valid_time: 3600
+      with_items:
+        - mysql-server
+        - mysql-client
+        - python-mysqldb
+        - php-mbstring
+        - php-bcmath
+        - php-xml
+        - libapache2-mod-php
+        - php-mcrypt
+        - php-mysql
+      become: true
+
+    - name: Update mysql root password for all root accounts
+      mysql_user:
+        name: root
+        host: "{{ item }}"
+        password: "{{ mysql_root_password }}"
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        check_implicit_admin: yes
+        priv: "*.*:ALL,GRANT"
+      with_items:
+        - "{{ ansible_hostname }}"
+        - 127.0.0.1
+        - ::1
+        - localhost
+      become: true
+
+    - name: Install apache2
+      apt:
+        name: apache2
+        update_cache: yes
+        state: latest
+        cache_valid_time: 3600
+      become: true
+
+    - name: Create temp folder in home directory
+      file:
+        path: /home/{{ ansible_user }}/temp
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0775
+      become: true
+
+    - name: Install Zabbix-server from .deb package
+      apt:
+        deb: "{{ zabbix_deb_url }}"
+      become: true
+
+    - name: Install Zabbix-server-mysql and zabbix-frontend-php packages
+      apt:
+        name: "{{ item }}"
+        state: installed
+        update_cache: yes
+        install_recommends: yes
+        cache_valid_time: 3600
+      with_items:
+        - zabbix-server-mysql
+        - zabbix-frontend-php
+      become: true
+
+    - name: create zabbix db
+      mysql_db:
+        name: "{{ mysql_zabbix_db }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        collation: utf8_bin
+        encoding: utf8
+      register: db_created
+
+    - name: create zabbix db user
+      mysql_user:
+        name: "{{ mysql_zabbix_user }}"
+        host: localhost
+        password: "{{ mysql_zabbix_user_password }}"
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        check_implicit_admin: yes
+        priv: "zabbix.*:ALL,GRANT"
+
+    - name: check if DB exists
+      shell: mysql -uroot -p"{{ mysql_root_password }}" -e 'use zabbix; show tables;' | grep users_groups
+      register: dbstatus
+      ignore_errors: True
+
+    - name: Update and Upgrade all packages
+      apt:
+        update_cache: yes
+        upgrade: yes
+      become: true
+
+    - name: extract zabbiz db
+      command: gunzip -k -f /usr/share/doc/zabbix-server-mysql/create.sql.gz
+      become: true
+
+    - name: import zabbix db
+      mysql_db:
+        state: import
+        name: "{{ mysql_zabbix_db }}"
+        login_user: root
+        login_host: localhost
+        login_password: "{{ mysql_root_password }}"
+        config_file: no
+        target: /usr/share/doc/zabbix-server-mysql/create.sql
+      when: dbstatus.rc != 0
+      become: true
+
+    - name: create zabbix config file
+      template:
+        src: zabbix_server.j2
+        dest: /etc/zabbix/zabbix_server.conf
+      become: true
+
+    - name: create zabbix apache config_file
+      template:
+        src: zabbix_apache_config.j2
+        dest: /etc/zabbix/apache.conf
+      become: true
+
+    - name: restart apache2
+      service:
+        name: apache2
+        state: restarted
+      become: true
+
+    - name: restart zabbix-server
+      service:
+        name: zabbix-server
+        state: restarted
+      become: true
